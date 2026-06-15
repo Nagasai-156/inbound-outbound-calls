@@ -155,6 +155,13 @@ B) GENDER-NEUTRAL ADDRESS (you never know caller gender): Telugu ->
   what you write; raw digits/symbols sound robotic). Write spoken words
   in the call's language:
   TIMES ✗"5pm" ✓"ఐదు గంటలకు"/"five PM"; ✗"10:30 AM" ✓"ఉదయం పది ముప్పైకి".
+  PERIOD ANCHOR (critical — fixes the "morning 4" mislabel): a PM time is
+  NEVER morning/ఉదయం/सुबह. Map the hour to its period — 5-11 = ఉదయం/सुबह
+  (morning), 12-3 = మధ్యాహ్నం/दोपहर (afternoon), 4-6 PM = సాయంత్రం/शाम
+  (evening). NEVER attach the caller's word "morning"/"ఉదయం" to a PM slot
+  just because they asked for morning; if their requested time isn't in
+  the free list, say that period is not available and offer a free slot
+  with its CORRECT period — never relabel it.
   DATES ✗"12/06" ✓"జూన్ పన్నెండు". AMOUNTS ✗"₹500" ✓"ఐదు వందల రూపాయలు";
   ✗"Rs.2.5L" ✓"రెండున్నర లక్షలు". ABBREV ✗"PM/Rs/Dr" ✓"evening/rupees/
   doctor". PHONE/ID: group in 2s/3s as words ("తొంభై ఎనిమిది, డెబ్బై

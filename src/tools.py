@@ -21,17 +21,34 @@ from livekit.agents import RunContext, function_tool
 from src.kb import kb_context
 
 
+def _period(hh: int) -> str:
+    """Deterministic clock-hour -> spoken period word. Computed in code so
+    the model NEVER has to derive AM/PM->period itself — that derivation is
+    what produced the live "4:00 PM read back as 'ఉదయం నాలుగు' (morning 4)"
+    loop (call out-976d2cbb18, reproduced 8/8 on 2026-06-15). Language-
+    agnostic: the English period word anchors the model, which still speaks
+    it in the caller's language (సాయంత్రం / शाम / evening)."""
+    if 5 <= hh < 12:
+        return "morning"
+    if 12 <= hh < 16:
+        return "afternoon"
+    return "evening"  # 16:00-18:00 booking window (and any later slot)
+
+
 def ampm12(t: str) -> str:
-    """'15:00' -> '3:00 PM'. The LLM misread raw 24-hour strings on live
-    calls (snapshot '15:00' was spoken as Telugu 'ఉదయం మూడు' = 3 AM,
-    call out-27691b1ea2) — every time shown to the model must be
-    unambiguous 12-hour AM/PM."""
+    """'15:00' -> '3:00 PM (afternoon)'. The LLM misread raw 24-hour strings
+    on live calls (snapshot '15:00' spoken as Telugu 'ఉదయం మూడు' = 3 AM,
+    call out-27691b1ea2; '16:00' spoken as 'ఉదయం నాలుగు' = morning 4,
+    call out-976d2cbb18). So every time shown to the model is now an
+    unambiguous 12-hour AM/PM string WITH its spoken period attached —
+    computed here, never left to the model to derive (the "dynamic", not
+    prompt-obedient, fix)."""
     try:
         hh, mm = (int(x) for x in str(t).strip().split(":")[:2])
     except Exception:
         return str(t)
     suffix = "AM" if hh < 12 else "PM"
-    return f"{hh % 12 or 12}:{mm:02d} {suffix}"
+    return f"{hh % 12 or 12}:{mm:02d} {suffix} ({_period(hh)})"
 
 
 def ampm12_list(ts) -> str:
@@ -42,29 +59,41 @@ logger = logging.getLogger("tools")
 
 def _instrument(name: str):
     """Wraps a tool function so EVERY invocation logs:
-      tool=<name> status=ok|error elapsed_ms=<n> result_chars=<n>
-    Pure observability — no behavior change. The previous dead-air bug
-    ('checking…' verbal filler then 35s silence) was invisible in the log
-    because tool entries weren't recorded; this fixes that so the next
-    incident produces a clear timing signature (slow DB? tool never
-    fired? framework dispatch issue?)."""
+      tool=<name> status=ok|error elapsed_ms=<n> args=<...> result=<snippet>
+    Pure observability — no behavior change. Two captures, both off the
+    streaming hot path:
+      * args  — the LLM-supplied tool arguments (the date/time the model
+        PARSED). This is the booking-loop smoking gun: if the caller said
+        "9 AM" but the model passed time="4 PM", that mis-parse is now
+        visible WITHOUT a synthetic repro (which never reproduced it). And
+        if a booking turn produced NO tool line at all, the model skipped
+        the tool — equally diagnostic.
+      * result (truncated) — what the table returned (free slots / "morning
+        booked"), the other half of the booking decision.
+    The original timing signature (slow DB? tool never fired?) is kept."""
     def deco(fn):
         @functools.wraps(fn)
         async def inner(context: "RunContext", *args, **kwargs):
             t0 = time.monotonic()
+            # context arrives positionally, so kwargs holds exactly the
+            # model-supplied named arguments. Cheap dict copy; small payloads.
+            _call_args = {k: v for k, v in kwargs.items() if k != "context"}
             try:
                 out = await fn(context, *args, **kwargs)
                 ms = (time.monotonic() - t0) * 1000
                 logger.info(
-                    "tool=%s status=ok elapsed_ms=%.0f result_chars=%d",
-                    name, ms, len(out) if isinstance(out, str) else 0,
+                    "tool=%s status=ok elapsed_ms=%.0f args=%s "
+                    "result_chars=%d result=%.200s",
+                    name, ms, _call_args,
+                    len(out) if isinstance(out, str) else 0,
+                    out if isinstance(out, str) else "",
                 )
                 return out
             except Exception as e:
                 ms = (time.monotonic() - t0) * 1000
                 logger.warning(
-                    "tool=%s status=ERROR elapsed_ms=%.0f err=%s",
-                    name, ms, type(e).__name__, exc_info=True,
+                    "tool=%s status=ERROR elapsed_ms=%.0f args=%s err=%s",
+                    name, ms, _call_args, type(e).__name__, exc_info=True,
                 )
                 raise
         return inner
