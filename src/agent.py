@@ -35,6 +35,11 @@ except Exception:  # pragma: no cover - name varies across builds
     class StopResponse(Exception):  # type: ignore[no-redef]
         ...
 
+try:
+    from livekit.agents.llm import FallbackAdapter as _LLMFallbackAdapter
+except Exception:  # pragma: no cover - name varies across builds
+    _LLMFallbackAdapter = None
+
 from src.audio import AdaptiveBuffer, EchoGuard, build_room_input_options
 from src.cache import semantic_cache
 from src.cancellation import CancellationRegistry
@@ -1214,47 +1219,53 @@ class VoiceAgent(Agent):
                         )
 
     def _get_fallback_llm(self):
-        """Lazily build a fallback LLM used ONLY when the primary fails a
-        turn BEFORE producing any token, so a per-model throttle/cap never
-        becomes dead-air. The old code returned None for every gpt-* and
-        azure/* primary (no fallback) — that is exactly how a gpt-4o TPM
-        cap turned into 14s of silence. Now every primary gets a DIFFERENT
-        reliable OpenAI sibling (separate per-model limit). `False` is the
-        'tried and failed' sentinel so we don't rebuild it every failing
-        turn.
+        """Lazily build the CROSS-PROVIDER fallback used ONLY when the
+        primary (Bedrock Ministral) fails a turn BEFORE producing any token,
+        so a Bedrock 503 / throttle / regional blip never becomes dead-air.
 
-        NOTE: same-provider fallback clears a per-MODEL throttle (the
-        gpt-4o TPM case) but NOT an OpenAI-wide outage — true cross-provider
-        resilience (paid Groq / a working Azure deployment) is an infra
-        decision still open. Azure gpt-4o-mini is deliberately NOT used:
-        that deployment 404s on this account (verified in the model audit)."""
+        Chain (both INDEPENDENT of Bedrock, so a Bedrock-wide outage is fully
+        covered — unlike the old same-provider OpenAI sibling):
+          1. Gemini Flash-Lite  — fast (~0.7s) + best Telugu
+          2. Grok (xAI)         — stable XAI key, good Telugu, last resort
+        FallbackAdapter tries Gemini first and drops to Grok on its
+        failure/timeout. If only one backend builds (missing key), we use it
+        alone; `False` = 'tried and failed' sentinel so we don't rebuild it
+        every failing turn.
+
+        Both are US-hosted — acceptable for the RARE fallback turn; the
+        India-resident, low-latency primary stays Bedrock Mumbai. Needs a
+        working GEMINI_API_KEY (the free-tier AIza key 429s — use a quota'd
+        key) and XAI_API_KEY; a dead Gemini key 401s fast → Grok still covers."""
         if self._fallback_llm is not None:
             return self._fallback_llm or None
-        model = (getattr(self._cfg, "llm_model", "") or "").lower()
-        # Cross-PROVIDER, India-fast fallback for our two primaries: a
-        # Mistral 429 (EU rate-limit) recovers on Bedrock Mumbai (AWS, no
-        # 429); a Bedrock blip recovers on Mistral (different provider, no
-        # shared limit). Both are ~India-latency, so the catch is ~0.6s
-        # instead of the old slow US gpt-4o-mini (which can itself 429).
-        if model.startswith("mistral/"):
-            fb_model = "bedrock/mistral.ministral-3-14b-instruct"
-        elif model.startswith("bedrock/"):
-            fb_model = "mistral/mistral-small-latest"
-        # Pick a DIFFERENT, reliable OpenAI model than an OpenAI primary.
-        elif "nano" in model:
-            fb_model = "gpt-4o-mini"
-        elif "mini" in model:
-            fb_model = "gpt-4.1-nano"
-        else:
-            fb_model = "gpt-4o-mini"
+        import dataclasses
+        chain = []
+        for tag, mdl in (
+            ("gemini", "gemini/gemini-flash-lite-latest"),
+            ("grok", "xai/grok-4.20-0309-non-reasoning"),
+        ):
+            try:
+                chain.append(
+                    build_llm(dataclasses.replace(self._cfg, llm_model=mdl))
+                )
+            except Exception:
+                logger.warning(
+                    "fallback build failed for %s", tag, exc_info=True
+                )
         try:
-            import dataclasses
-            fb_cfg = dataclasses.replace(self._cfg, llm_model=fb_model)
-            self._fallback_llm = build_llm(fb_cfg)
-            logger.info("built fallback LLM %s (primary=%s)", fb_model, model)
+            if len(chain) >= 2 and _LLMFallbackAdapter is not None:
+                self._fallback_llm = _LLMFallbackAdapter(chain)
+                logger.info(
+                    "built fallback chain: Gemini Flash-Lite -> Grok"
+                )
+            elif chain:
+                self._fallback_llm = chain[0]
+                logger.info("built single fallback backend (chain<2)")
+            else:
+                self._fallback_llm = False
         except Exception:
-            logger.warning("failed to build fallback LLM", exc_info=True)
-            self._fallback_llm = False
+            logger.warning("failed to build fallback adapter", exc_info=True)
+            self._fallback_llm = chain[0] if chain else False
         return self._fallback_llm or None
 
     async def _stream_from_llm(self, llm_obj, chat_ctx, tools, model_settings):
@@ -1473,16 +1484,16 @@ class VoiceAgent(Agent):
         # we truly look something up, else a soft ack) — it never forces
         # a fire.
         _is_llm = result.route == Route.LLM
-        # BALANCED filler (the 85%/gap>=1 instant-feel version fired too
-        # often — interjected "ఒక్క నిమిషం" on weak turns like "ఉమ్",
-        # choppy/robotic). The real latency win is the endpointing cut
-        # (~256ms), so the filler can stay OCCASIONAL: only on a slow LLM
-        # turn that has REAL content (not a bare ack/hesitation), never 2
-        # within 2 turns, ~50%. Covers genuine gaps, never interjects on
-        # "um".
-        _has_content = len((text or "").split()) >= 3
-        _gap_ok = (self._caller_turns_seen - self._last_filler_turn) >= 2
-        _fire = _is_llm and _has_content and _gap_ok and (random.random() < 0.5)
+        # INSTANT-FEEL coverage (user goal: sub-600ms perceived). Cover
+        # MOST slow LLM turns with a filler so the caller hears a reply
+        # at ~460ms (endpointing) + ~10ms (cached filler) instead of
+        # waiting the full ~1s for the real answer. Kept natural by:
+        # deterministic rotation (never the same filler twice) + gap>=1
+        # so back-to-back slow turns still get DIFFERENT short fillers,
+        # like a real person ("hmm... okay... let me see..."), not the
+        # robotic same-word-every-time tell.
+        _gap_ok = (self._caller_turns_seen - self._last_filler_turn) >= 1
+        _fire = _is_llm and _gap_ok and (random.random() < 0.85)
         if should_filler(result.route, cfg=self._cfg) and _fire:
             self._last_filler_turn = self._caller_turns_seen
             self._pending_filler = asyncio.ensure_future(
