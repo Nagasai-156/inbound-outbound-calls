@@ -1,0 +1,24 @@
+[Unit]
+# Diigoo voice-agent worker (LiveKit). Auto-restarts on crash — this
+# replaces the Windows watchdog and is the cure for "calls connect but
+# silence" (worker losing LiveKit registration).
+Description=Diigoo Voice Agent Worker
+After=network-online.target redis-server.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/diigoo
+# The app reads .env itself (pydantic settings) from WorkingDirectory.
+ExecStart=/home/ubuntu/diigoo/.venv/bin/python -m src.agent start
+Restart=always
+RestartSec=5
+# Bound restart storms: max 5 restarts in 60s, then back off.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+StandardOutput=append:/home/ubuntu/diigoo/worker.log
+StandardError=append:/home/ubuntu/diigoo/worker.err.log
+
+[Install]
+WantedBy=multi-user.target

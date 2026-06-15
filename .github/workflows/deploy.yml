@@ -1,0 +1,28 @@
+name: Deploy to EC2
+
+# Auto-deploy on every push to main. SSHes into the Mumbai EC2 box and
+# runs the smart deploy script (pulls + rebuilds/restarts only what
+# changed). Requires 3 repo secrets:
+#   EC2_HOST     -> the server public IP (e.g. 15.206.179.20)
+#   EC2_USER     -> ubuntu
+#   EC2_SSH_KEY  -> the FULL contents of diigoo-key.pem (private key)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}   # allows manual "Run workflow" from the Actions tab
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          command_timeout: 20m
+          script: |
+            cd ~/diigoo
+            bash deploy/deploy.sh

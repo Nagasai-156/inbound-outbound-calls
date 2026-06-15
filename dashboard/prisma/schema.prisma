@@ -1,0 +1,409 @@
+// Prisma owns the schema + migrations for the Supabase Postgres DB.
+// The Python voice agent connects to the SAME database (asyncpg) to read
+// AgentConfig and write Call/Transcript rows. The Next.js dashboard uses
+// this Prisma client for config + history; Supabase Realtime streams live
+// updates to the UI.
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["multiSchema"]
+}
+
+// Our tables live in a DEDICATED `voiceai` schema, never `public`.
+// This makes it impossible for a Prisma sync to touch the app's other
+// tables (users, phone_numbers, voice_configs, …) which stay in `public`.
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+  schemas   = ["voiceai"]
+}
+
+/// All dashboard-editable voice/agent settings. Single active row
+/// (id = "default"); the agent loads it at the start of every call so
+/// changes apply to the next call without a redeploy.
+model AgentConfig {
+  id        String   @id @default("default")
+
+  // ── TTS voice & language ────────────────────────────────────────
+  ttsProvider     String  @default("sarvam")    // sarvam
+  ttsModel        String  @default("bulbul:v2")
+  defaultLanguage String  @default("en")        // te | hi | en
+  ttsSpeakerTe    String  @default("anushka")
+  ttsSpeakerHi    String  @default("anushka")
+  ttsSpeakerEn    String  @default("anushka")
+  ttsPace         Float   @default(1.0)         // speaking rate multiplier
+  // Per-language pace overrides — 0 = inherit global ttsPace
+  ttsPaceTe       Float   @default(0)
+  ttsPaceHi       Float   @default(0)
+  ttsPaceEn       Float   @default(0)
+
+  // ── Turn-taking & latency (seconds) ─────────────────────────────
+  minEndpointingDelay       Float @default(0.4)
+  maxEndpointingDelay       Float @default(3.0)
+  teluguMinEndpointingDelay Float @default(0.7)
+  minInterruptionDuration   Float @default(0.2)
+  fillerLatencyThreshold    Float @default(0.3)
+  fillerMinSttConfidence    Float @default(0.55)
+
+  // ── Persona & content ───────────────────────────────────────────
+  agentName           String @default("Zari")    // the agent's spoken name (per-business, no longer hardcoded)
+  inboundPersona      String @default("")        // override; "" = built-in
+  outboundPersona     String @default("")
+  businessDescription String @default("")        // used by content gen
+  styleExamples       String @default("")        // few-shot override; "" = neutral built-in
+  useCaseType         String @default("custom")  // global/inbound use-case: appointment|sales|leadgen|survey|support|reminder|collections|feedback|reschedule|custom
+  // Per-config tool override: comma-separated tool names the agent is
+  // allowed to call. Empty ("") = use the built-in use-case → tools map
+  // (back-compat / zero regression). Non-empty = use ONLY these tools
+  // (plus base kb_search + end_call, always included). Lets a single
+  // business mix tools beyond a single use-case (e.g. salon = appointment
+  // tools + order_status; sales rep = nothing-but-kb).
+  enabledTools        String @default("")
+  // When true, the agent mirrors the caller's MOST RECENT turn language
+  // (full-sentence switch is immediate, code-mix is treated as code-mix).
+  // When false, the agent stays in defaultLanguage throughout.
+  autoMirrorLanguage  Boolean @default(false)
+  contentRegenAt      DateTime?                   // set to request regen
+
+  // ── Appointment grid (dashboard-editable; any business: clinic 9-6,
+  // salon 10-8, gym 6-22, etc.) ───────────────────────────────────────
+  // The grid the agent can BOOK. Defaults match clinic 9 AM-6 PM, 30-min
+  // slots, Mon-Sat — same as the env defaults so existing deploys are
+  // unchanged until an operator edits these from the dashboard.
+  apptOpenHour     Int    @default(9)             // 0-23
+  apptCloseHour    Int    @default(18)            // 1-24 (exclusive)
+  apptSlotMin      Int    @default(30)            // 5-120 minutes
+  // Comma-separated weekday indices, Mon=0..Sun=6. Default = Mon-Sat.
+  apptOpenWeekdays String @default("0,1,2,3,4,5")
+
+  // ── Model & KB ──────────────────────────────────────────────────
+  llmProvider          String @default("azure")   // openai | mistral | cerebras
+  llmModel             String @default("gpt-4o-mini")
+  llmTemperature       Float  @default(0.4)
+  memoryMaxTurns       Int    @default(6)
+  // Hard cap on the assembled per-turn LLM prompt (persona + per-turn
+  // markers + chat history). Prevents unbounded history growth from
+  // blowing past a model/tier token limit (the Groq free-tier 12k 413
+  // dead-air bug). System messages are never trimmed; oldest raw turns
+  // are dropped first. 8000 leaves ~4k headroom under a 12k cap.
+  llmPromptMaxTokens   Int    @default(8000)
+  // Replay cached audio for fixed repeated phrases (fillers/canned/warm)
+  // instead of re-synthesising — skips TTS first-byte latency. Default
+  // off; validate on a live call before enabling.
+  ttsAudioCache        Boolean @default(false)
+  kbVectorStoreId      String @default("")
+  cacheMinSimilarity   Float  @default(0.92)
+  sttModel             String @default("saaras:v3")
+  sttMode              String @default("codemix")
+
+  updatedAt DateTime @updatedAt
+  updatedBy String   @default("")
+
+  @@schema("voiceai")
+}
+
+/// One row per phone/web call. Upserted live by the agent's telemetry.
+model Call {
+  id          String   @id            // == LiveKit room name / call id
+  room        String
+  direction   String   @default("inbound")  // inbound | outbound | web
+  status      String   @default("live")     // live | ended
+  language    String   @default("")
+  emotion     String   @default("")
+  intent      String   @default("")
+  callerName  String   @default("")
+  turns       Int      @default(0)
+  llmCalls    Int      @default(0)
+  kbCalls     Int      @default(0)
+  bypassRate  Float    @default(0)
+  // TTS provider/model used on this call — drives the per-call cost rate.
+  // (Already present in the DB; declared here so `db push` never drops it.)
+  ttsModel    String   @default("")
+  ttsProvider String   @default("")
+  // Per-call latency aggregates (milliseconds). Populated by the agent's
+  // metrics_collected handler from LiveKit EOU/LLM/TTS metrics. 0 = no data.
+  avgEouMs        Int @default(0)
+  maxEouMs        Int @default(0)
+  avgLlmTtftMs    Int @default(0)
+  maxLlmTtftMs    Int @default(0)
+  avgTtsTtfbMs    Int @default(0)
+  maxTtsTtfbMs    Int @default(0)
+  // Prompt-assembly + appt-snapshot-DB sub-stages hidden inside LLM TTFT.
+  avgAssemblyMs   Int @default(0)
+  maxAssemblyMs   Int @default(0)
+  avgSnapshotMs   Int @default(0)
+  maxSnapshotMs   Int @default(0)
+  summary     String   @default("")
+  sentiment   String   @default("")
+  outcome     String   @default("")
+  actionItems String   @default("")
+  startedAt   DateTime @default(now())
+  endedAt     DateTime?
+
+  transcript  Transcript[]
+
+  @@index([status, startedAt])
+  @@schema("voiceai")
+}
+
+/// One row per spoken turn (caller or agent), in order.
+model Transcript {
+  id     BigInt   @id @default(autoincrement())
+  callId String
+  role   String                           // user | agent
+  text   String
+  ts     DateTime @default(now())
+
+  call   Call     @relation(fields: [callId], references: [id], onDelete: Cascade)
+
+  @@index([callId, ts])
+  @@schema("voiceai")
+}
+
+/// Phone numbers you own / use as caller-id for outbound.
+model PhoneNumber {
+  id        String   @id @default(cuid())
+  e164      String   @unique          // +9198XXXXXXXX
+  label     String   @default("")
+  // A number can serve inbound, outbound, or BOTH (real telephony).
+  inbound   Boolean  @default(false)  // rings into the agent
+  outbound  Boolean  @default(true)   // usable as caller-ID for outbound
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  @@schema("voiceai")
+}
+
+/// A bulk outbound calling campaign.
+model Campaign {
+  id          String   @id @default(cuid())
+  name        String
+  status      String   @default("draft")  // draft|running|paused|done
+  callerId    String   @default("")        // PhoneNumber.e164 used for CLI
+  language    String   @default("")        // optional forced language
+  // Per-campaign goal/script — overrides the global outbound persona for
+  // THIS campaign's calls, so appointment & sales campaigns can run at
+  // the same time, each communicating to its own purpose.
+  script      String   @default("")
+  voiceModel  String   @default("")        // "" = use global Voice config
+  voiceSpeaker String  @default("")        // "" = use global Voice config
+  // Per-campaign use-case + content overrides ("" = inherit global AgentConfig)
+  useCaseType         String @default("")  // appointment|sales|leadgen|survey|support|reminder|collections|feedback|reschedule|custom
+  businessDescription String @default("")  // per-campaign business facts override
+  styleExamples       String @default("")  // per-campaign few-shot override
+  kbVectorStoreId     String  @default("")  // legacy field — use kbId instead
+  kbId                String?              // FK to KnowledgeBase.id
+  total       Int      @default(0)
+  completed   Int      @default(0)
+  failed      Int      @default(0)
+  createdAt   DateTime @default(now())
+  startedAt   DateTime?
+  finishedAt  DateTime?
+
+  contacts    CampaignContact[]
+  runs        CampaignRun[]
+  @@index([status, createdAt])
+  @@schema("voiceai")
+}
+
+/// One execution of a campaign. Each Run / Re-run creates a new row so
+/// past run results are preserved (CampaignContact only holds the
+/// LATEST live state for the dialer; this is the durable history).
+model CampaignRun {
+  id         String   @id @default(cuid())
+  campaignId String
+  runNo      Int                              // 1,2,3… per campaign
+  status     String   @default("running")     // running | done
+  total      Int      @default(0)
+  completed  Int      @default(0)
+  failed     Int      @default(0)
+  startedAt  DateTime @default(now())
+  finishedAt DateTime?
+
+  campaign   Campaign             @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  contacts   CampaignRunContact[]
+
+  @@index([campaignId, runNo])
+  @@schema("voiceai")
+}
+
+/// Per-contact result snapshot for ONE run (so each run keeps its own
+/// outcomes + transcript link even after a later re-run).
+model CampaignRunContact {
+  id        String   @id @default(cuid())
+  runId     String
+  phone     String
+  name      String   @default("")
+  status    String   @default("dialing")      // dialing | done | failed
+  room      String   @default("")             // Call id -> transcript
+  error     String   @default("")
+  updatedAt DateTime @updatedAt
+
+  run       CampaignRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@unique([runId, phone])
+  @@index([runId])
+  @@schema("voiceai")
+}
+
+/// KB vector chunks — created/managed by the Python pgvector pipeline
+/// (src/kb_store.py). Modeled here ONLY so `prisma db push` recognises
+/// it and never drops it. Prisma does not touch the vector column.
+model KbChunk {
+  id        BigInt   @id @default(autoincrement())
+  docId     String   @map("doc_id")
+  // kb_id is created+filled by src/kb_store.py (per-KB filter). Declared
+  // here ONLY so `prisma db push` sees it and never drops the column.
+  kbId      String   @default("") @map("kb_id")
+  filename  String   @default("")
+  lang      String   @default("")
+  content   String
+  embedding Unsupported("vector(1536)")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@map("kb_chunks")
+  @@schema("voiceai")
+}
+
+/// One target row inside a campaign.
+model CampaignContact {
+  id         String   @id @default(cuid())
+  campaignId String
+  phone      String
+  name       String   @default("")
+  status     String   @default("pending") // pending|dialing|done|failed
+  room       String   @default("")
+  error      String   @default("")
+  attempts   Int      @default(0)
+  updatedAt  DateTime @updatedAt
+
+  campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  @@index([campaignId, status])
+  @@schema("voiceai")
+}
+
+/// Appointments — booked on a call (by the agent via its tools) or
+/// manually from the dashboard. The agent reads free/booked slots from
+/// here before offering a time, and writes a row when it books one.
+/// Date/time kept as strings ("YYYY-MM-DD" / "HH:MM") to avoid timezone
+/// drift between the phone agent, the DB and the dashboard.
+model Appointment {
+  id        String   @id @default(cuid())
+  date      String                          // YYYY-MM-DD
+  time      String                          // HH:MM (slot start, 24h)
+  name      String   @default("")
+  phone     String   @default("")
+  reason    String   @default("")           // checkup|cleaning|pain|...
+  status    String   @default("booked")     // booked|cancelled|done
+  source    String   @default("call")       // call|manual
+  room      String   @default("")           // linked call room, if any
+  // ── Generic optional fields so any business can use the same table
+  // without a per-business schema change. All optional with sensible
+  // defaults — existing rows + existing tools unchanged.
+  //   partySize  : restaurants/hotels/event venues (0 = N/A)
+  //   serviceType: salons/clinics/spas — which service was booked
+  //   notes      : free-form long-text for special instructions
+  partySize   Int    @default(0)
+  serviceType String @default("")
+  notes       String @default("")
+  createdAt DateTime @default(now())
+
+  @@index([date, status])
+  // Hot-path: appt_find_by_phone(phone) fires once per appointment-flow
+  // turn to look up the caller's existing bookings (LIVE appt snapshot
+  // injected into the LLM context). Without this index it sequentially
+  // scans Appointment — fine <1K rows, painful at 10K+. Cheap addition.
+  @@index([phone])
+  @@schema("voiceai")
+}
+
+/// A saved snapshot of the full Voice & Agent settings, named for reuse.
+/// Campaigns and single calls pick one to pre-fill all settings.
+model VoiceConfig {
+  id          String   @id @default(cuid())
+  name        String
+
+  // Voice
+  ttsModel        String  @default("bulbul:v2")
+  defaultLanguage String  @default("te")
+  ttsSpeakerTe    String  @default("")
+  ttsSpeakerHi    String  @default("")
+  ttsSpeakerEn    String  @default("")
+  ttsPace         Float   @default(1.0)
+  ttsPaceTe       Float   @default(0)
+  ttsPaceHi       Float   @default(0)
+  ttsPaceEn       Float   @default(0)
+  autoMirrorLanguage Boolean @default(false)
+
+  // Turn-taking
+  minEndpointingDelay       Float @default(0.4)
+  maxEndpointingDelay       Float @default(1.0)
+  teluguMinEndpointingDelay Float @default(0.7)
+  minInterruptionDuration   Float @default(0.2)
+  fillerLatencyThreshold    Float @default(0.3)
+  fillerMinSttConfidence    Float @default(0.55)
+
+  // Persona & content
+  inboundPersona      String @default("")
+  outboundPersona     String @default("")
+  businessDescription String @default("")
+  styleExamples       String @default("")
+  useCaseType         String @default("custom")
+
+  // Model
+  llmProvider        String @default("azure")
+  llmModel           String @default("gpt-4o-mini")
+  llmTemperature     Float  @default(0.4)
+  sttModel           String @default("saaras:v3")
+  sttMode            String @default("codemix")
+  memoryMaxTurns     Int    @default(6)
+  llmPromptMaxTokens Int    @default(8000)
+  cacheMinSimilarity Float  @default(0.92)
+  ttsAudioCache      Boolean @default(false)
+  kbVectorStoreId    String @default("")
+
+  // TTS provider + tools + appointment grid (full parity with AgentConfig
+  // so a saved profile is a COMPLETE snapshot that can be applied back to
+  // the live config without losing any setting).
+  ttsProvider      String @default("sarvam")
+  enabledTools     String @default("")
+  apptOpenHour     Int    @default(9)
+  apptCloseHour    Int    @default(18)
+  apptSlotMin      Int    @default(30)
+  apptOpenWeekdays String @default("0,1,2,3,4,5")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@schema("voiceai")
+}
+
+/// A named knowledge base. Each org can have multiple, each with its
+/// own set of documents. Campaigns and single calls pick which KB to use.
+model KnowledgeBase {
+  id          String       @id @default(cuid())
+  name        String
+  description String       @default("")
+  createdAt   DateTime     @default(now())
+
+
+  @@schema("voiceai")
+}
+
+/// Knowledge-base documents ingested into pgvector.
+model KbDocument {
+  id            String         @id @default(cuid())
+  kbId          String?
+  filename      String
+  sizeBytes     Int            @default(0)
+  status        String         @default("uploaded") // uploaded|ingesting|indexed|failed
+  vectorStoreId String         @default("")
+  error         String         @default("")
+  createdAt     DateTime       @default(now())
+
+  @@index([kbId, status])
+  @@index([status, createdAt])
+  @@schema("voiceai")
+}

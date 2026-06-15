@@ -1,0 +1,19 @@
+[Unit]
+# Diigoo control API (FastAPI) — outbound dialing, LiveKit tokens,
+# config reload. Bound to 127.0.0.1 (loopback) for safety; reachable
+# only from this box. If the dashboard runs elsewhere, expose via a
+# reverse proxy + auth, not by binding 0.0.0.0 directly.
+Description=Diigoo Control API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/diigoo
+ExecStart=/home/ubuntu/diigoo/.venv/bin/python -m uvicorn src.web.server:app --host 127.0.0.1 --port 8000
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

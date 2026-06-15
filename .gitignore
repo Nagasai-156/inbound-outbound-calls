@@ -1,0 +1,52 @@
+# ─── SECRETS — never commit (all .env at any depth) ───────────────
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+!**/.env.example
+*.pem
+*.key
+*credential*
+
+# ─── Python ───────────────────────────────────────────────────────
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# ─── Node / dashboard ─────────────────────────────────────────────
+node_modules/
+**/node_modules/
+.next/
+**/.next/
+*.tsbuildinfo
+
+# ─── Logs & runtime junk ──────────────────────────────────────────
+*.log
+*.log.*
+*.out.log
+*.err.log
+KMS/logs/
+call_requests.json
+
+# ─── Debug scratch + benchmark output (CONTAIN REAL CALL PII — never commit) ─
+scratch/
+benchmarks/
+*_call_log*.txt
+*call_transcript*.txt
+worker_*.txt
+
+# ─── Claude Code local settings ───────────────────────────────────
+.claude/
+
+# ─── Editors / OS ─────────────────────────────────────────────────
+.idea/
+.vscode/
+.DS_Store
+
+# generated voice samples
+voice_compare/

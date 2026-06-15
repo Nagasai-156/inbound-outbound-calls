@@ -1,0 +1,19 @@
+[Unit]
+# Diigoo dashboard (Next.js production server). Serves the control UI on
+# port 3000. Talks to the local control API at 127.0.0.1:8000 (same box).
+Description=Diigoo Dashboard
+After=network-online.target diigoo-api.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/diigoo/dashboard
+Environment=PORT=3000
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/npm start
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

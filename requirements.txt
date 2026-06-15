@@ -1,0 +1,45 @@
+# Core realtime voice agent framework
+livekit-agents>=1.0.0
+livekit-api>=0.8.0
+
+# STT / TTS — Sarvam (Indian languages, codemix)
+livekit-plugins-sarvam>=0.1.0
+
+# LLM — OpenAI (gpt-4o-mini streaming) + KB file_search
+livekit-plugins-openai>=0.10.0
+openai>=1.40.0
+
+# VAD + contextual turn detection
+livekit-plugins-silero>=0.7.0
+livekit-plugins-turn-detector>=0.4.0
+
+# Echo / noise cancellation (AEC) at the LiveKit input edge
+livekit-plugins-noise-cancellation>=0.2.0
+
+# Semantic cache + per-call structured memory/state
+redis>=5.0.0
+
+# Supabase Postgres access (system of record; Prisma owns the schema)
+asyncpg>=0.29.0
+
+# KB ingestion: text extraction for the pgvector pipeline
+pypdf>=4.2.0
+python-docx>=1.1.0
+
+# Web console: token endpoint, admin API, SSE, static frontend
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+python-multipart>=0.0.9
+
+# Config + env
+pydantic>=2.7.0
+pydantic-settings>=2.3.0
+python-dotenv>=1.0.0
+
+# Utilities
+numpy>=1.26.0
+
+# Dev / tests
+pytest>=8.0.0
+pytest-asyncio>=0.23.0
+h2  # httpx[http2] for Bedrock HTTP/2 client
