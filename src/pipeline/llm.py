@@ -372,15 +372,14 @@ def build_llm(cfg: RuntimeConfig | None = None) -> openai.LLM:
         kwargs["max_retries"] = 0
         kwargs["timeout"] = 5.0
     if is_bedrock:
-        # Measured ~12% per-ATTEMPT 503 (InternalServerError) from Bedrock
-        # Ministral ap-south-1 under load (probe 2026-06-15: 3/24 failed,
-        # ok-latency p50 ~594ms). The 503s are transient and fail fast, so
-        # retries self-heal them. 1 retry left ~1.5% of turns failing — enough
-        # to drive the latency-TAIL (p95) spikes + rare dead-air. 3 retries
-        # drops the effective failure to ~0.02%; only the rare double-fail
-        # turn pays extra backoff, and those would have dead-aired anyway.
-        # India-hosted + AWS-managed = no 429 to worry about.
-        kwargs["max_retries"] = 3
+        # Bedrock Ministral ap-south-1 shows ~12% per-attempt transient 503s
+        # under load (probe 2026-06-15). We TESTED max_retries=3 to absorb
+        # them, but each retry's backoff lengthens the LLM TAIL (p95) on the
+        # failing turns. Per the call owner, keeping the latency tail tight
+        # beats squeezing out the last ~1.5% of 503 turns — so ONE retry
+        # (the long-standing value). India-hosted + AWS-managed: no 429 to
+        # stack on top.
+        kwargs["max_retries"] = 1
         kwargs["timeout"] = 8.0
     if is_gemini or is_xai:
         kwargs["max_retries"] = 1
