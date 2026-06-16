@@ -149,6 +149,7 @@ export const LLM_PROVIDERS: Opt[] = [
   { value: "bedrock", label: "⭐ AWS Bedrock (Mumbai — India-hosted, sub-700ms, no 429)" },
   { value: "gemini", label: "Google Gemini (best Telugu script, ~750ms — free tier)" },
   { value: "xai", label: "xAI Grok (non-reasoning, ~1.2s)" },
+  { value: "groq", label: "Groq Llama (70B — best booking reasoning, US-hosted ~1.3s)" },
   { value: "openai", label: "OpenAI (US region, ~1.2s)" },
 ];
 
@@ -193,6 +194,16 @@ export const LLM_MODELS: Opt[] = [
   // think time. Verified live 2026-06-15.
   { value: "xai/grok-4.20-0309-non-reasoning", label: "⭐ Grok 4.20 non-reasoning (voice pick, ~1.2s)" },
   { value: "xai/grok-3-mini", label: "Grok 3 Mini (lighter, ~2.8s)" },
+
+  // Groq (prefix: groq/). Backend calls api.groq.com (Llama on LPU chips).
+  // US-hosted (no India residency) + dev-tier rate limits at scale, but
+  // 70B grounds the booking correctly (no flip-flop / "10:30" / "morning 4"
+  // hallucinations the 14B hit) — verified end-to-end 2026-06-16: 6/6
+  // reschedule tool-calls, correct opener grounding. ~1.3s TTFT on the full
+  // persona prompt. gpt-oss-120b (dev-tier 429) + llama-4-scout (hallucinated
+  // tool names) tested and intentionally OMITTED.
+  { value: "groq/llama-3.3-70b-versatile", label: "⭐ Groq Llama 3.3 70B (best booking reasoning, US ~1.3s)" },
+  { value: "groq/llama-3.1-8b-instant", label: "Groq Llama 3.1 8B Instant (fastest, lighter — weaker on long turns)" },
 ];
 
 // Return ONLY the LLM models that belong to the given provider. The
@@ -207,6 +218,7 @@ export function llmModelsFor(provider: string): Opt[] {
     if (provider === "mistral") return v.startsWith("mistral/");
     if (provider === "gemini") return v.startsWith("gemini/");
     if (provider === "xai") return v.startsWith("xai/");
+    if (provider === "groq") return v.startsWith("groq/");
     if (provider === "openai") {
       return v.startsWith("gpt-");
     }
