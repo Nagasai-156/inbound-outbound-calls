@@ -54,6 +54,10 @@ _GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
 # xAI Grok — OpenAI-compatible, selected via `xai/<model>`, e.g.
 # `xai/grok-4.20-0309-non-reasoning`. US-hosted.
 _XAI_BASE_URL = "https://api.x.ai/v1"
+# Groq — OpenAI-compatible, Llama on LPU chips. Selected via
+# `groq/<model>`, e.g. `groq/llama-3.3-70b-versatile`. US-hosted but
+# LPU-fast (TTFT ~291ms from India in probe).
+_GROQ_BASE_URL = "https://api.groq.com/openai/v1"
 
 
 def _build_shared_client() -> _openai_sdk.AsyncOpenAI | None:
@@ -340,9 +344,10 @@ def build_llm(cfg: RuntimeConfig | None = None) -> openai.LLM:
     is_bedrock = model_lc.startswith("bedrock/")
     is_gemini = model_lc.startswith("gemini/")
     is_xai = model_lc.startswith("xai/")
+    is_groq = model_lc.startswith("groq/")
 
     model_name = cfg.llm_model
-    if is_mistral or is_bedrock or is_gemini or is_xai:
+    if is_mistral or is_bedrock or is_gemini or is_xai or is_groq:
         model_name = cfg.llm_model.split("/", 1)[1]
 
     kwargs: dict = {
@@ -382,6 +387,11 @@ def build_llm(cfg: RuntimeConfig | None = None) -> openai.LLM:
         kwargs["max_retries"] = 1
         kwargs["timeout"] = 8.0
     if is_gemini or is_xai:
+        kwargs["max_retries"] = 1
+        kwargs["timeout"] = 8.0
+    if is_groq:
+        # LPU-fast; one quick retry covers a dev-tier 429/blip without
+        # stacking latency.
         kwargs["max_retries"] = 1
         kwargs["timeout"] = 8.0
     if is_mistral:
@@ -431,6 +441,15 @@ def build_llm(cfg: RuntimeConfig | None = None) -> openai.LLM:
         else:
             logger.warning(
                 "xAI LLM selected but XAI_API_KEY not configured; "
+                "falling back to OpenAI defaults"
+            )
+    elif is_groq:
+        if settings.groq_api_key:
+            kwargs["api_key"] = settings.groq_api_key
+            kwargs["base_url"] = _GROQ_BASE_URL
+        else:
+            logger.warning(
+                "Groq LLM selected but GROQ_API_KEY not configured; "
                 "falling back to OpenAI defaults"
             )
     else:

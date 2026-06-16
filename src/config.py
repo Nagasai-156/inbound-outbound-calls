@@ -70,6 +70,12 @@ class Settings(BaseSettings):
     # xAI Grok — OpenAI-compatible. grok-4.20-non-reasoning tested
     # consistent ~600ms from EC2 + good Telugu. US-hosted.
     xai_api_key: str = Field(default="", alias="XAI_API_KEY")
+    # Groq — OpenAI-compatible, runs Llama on LPU chips. Selected via
+    # `groq/<model>` prefix (e.g. groq/llama-3.3-70b-versatile). Probe
+    # 2026-06: TTFT p50 ~291ms from India + 6/6 reschedule tool-calls in
+    # Telugu — faster than Bedrock Mumbai despite US hosting. US-hosted
+    # (no India residency) + free/dev-tier rate limits at scale.
+    groq_api_key: str = Field(default="", alias="GROQ_API_KEY")
     # ─── AWS Bedrock (Claude / Nova — India Mumbai region option) ─
     # Bearer token from Bedrock console → API keys. Selected via
     # `bedrock/<model>` prefix (e.g. bedrock/claude-3-5-haiku). Probe
