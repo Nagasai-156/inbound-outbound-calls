@@ -362,7 +362,7 @@ class VoiceAgent(Agent):
         # DB-read latency spikes to ~1 per call with zero staleness risk.
         self._appt_snap_text: str = ""
         self._appt_snap_ts: float = 0.0
-        self._APPT_SNAP_TTL = 18.0
+        self._APPT_SNAP_TTL = 45.0
         # Per-stage latency instrumentation (last LLM turn) — exposed so the
         # dashboard can show the micro-breakdown hidden inside "LLM TTFT".
         self._last_assembly_ms: float = 0.0
